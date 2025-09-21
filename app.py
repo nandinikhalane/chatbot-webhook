@@ -1,226 +1,154 @@
-"""
-Dialogflow Webhook in Python (Flask)
-Handles:
-- PHQ-9 / GAD-7 scoring
-- Crisis escalation
-- Counsellor booking
-"""
-
 from flask import Flask, request, jsonify
-import os
 
 app = Flask(__name__)
 
-TELE_MANAS_HELPLINE = os.environ.get("HELPLINE_NUMBER", "14416")
+# Crisis helpline constant
+TELE_MANAS_HELPLINE = "14416"
 
-# ------------------ Helpers ------------------
-
-def extract_numeric_answers(query_result, prefix, num_questions):
-    """Try to read answers from parameters or contexts"""
-    params = query_result.get("parameters", {})
-    answers = []
-
-    # 1) Parameters like phq9_q1...phq9_q9
-    for i in range(1, num_questions + 1):
-        key = f"{prefix}_q{i}"
-        if key in params:
-            try:
-                answers.append(int(params[key]))
-            except Exception:
-                pass
-    if len(answers) == num_questions:
-        return answers
-
-    # 2) Parameters as array: phq9_answers
-    arr_key = f"{prefix}_answers"
-    if isinstance(params.get(arr_key), list) and len(params[arr_key]) >= num_questions:
-        try:
-            return [int(x) for x in params[arr_key][:num_questions]]
-        except Exception:
-            pass
-
-    # 3) Check contexts
-    for ctx in query_result.get("outputContexts", []):
-        ctx_params = ctx.get("parameters", {})
-        answers = []
-        found = True
-        for i in range(1, num_questions + 1):
-            key = f"{prefix}_q{i}"
-            if key in ctx_params:
-                try:
-                    answers.append(int(ctx_params[key]))
-                except Exception:
-                    found = False
-                    break
-            else:
-                found = False
-                break
-        if found and len(answers) == num_questions:
-            return answers
-
-        if isinstance(ctx_params.get(arr_key), list) and len(ctx_params[arr_key]) >= num_questions:
-            try:
-                return [int(x) for x in ctx_params[arr_key][:num_questions]]
-            except Exception:
-                pass
-
-    return None
-
-
-def score_phq9(answers):
-    total = sum(answers)
-    if total <= 4:
-        severity = "Minimal or none"
-    elif total <= 9:
-        severity = "Mild"
-    elif total <= 14:
-        severity = "Moderate"
-    elif total <= 19:
-        severity = "Moderately severe"
-    else:
-        severity = "Severe"
-    suicidal_item = answers[8] > 0  # Q9
-    return total, severity, suicidal_item
-
-
-def score_gad7(answers):
-    total = sum(answers)
-    if total <= 4:
-        severity = "Minimal or none"
-    elif total <= 9:
-        severity = "Mild"
-    elif total <= 14:
-        severity = "Moderate"
-    else:
-        severity = "Severe"
-    return total, severity
-
-
-def text_response(text, output_contexts=None):
-    resp = {
-        "fulfillmentText": text,
-        "fulfillmentMessages": [{"text": {"text": [text]}}],
+# -----------------------
+# Utility: build response
+# -----------------------
+def text_response(text):
+    return {
+        "fulfillmentMessages": [
+            {"text": {"text": [text]}}
+        ]
     }
-    if output_contexts:
-        resp["outputContexts"] = output_contexts
-    return resp
 
-# ------------------ Routes ------------------
+# -----------------------
+# Intent Handlers
+# -----------------------
+def handle_welcome():
+    return text_response("Hi! I’m glad you reached out. How are you feeling today?")
 
-@app.route("/", methods=["GET"])
-def health():
-    return "Dialogflow webhook running", 200
+def handle_thanks():
+    return text_response("You’re welcome! I’m here whenever you want to talk.")
 
+def handle_goodbye():
+    return text_response("Take care! Reach out anytime. You are not alone.")
 
+def handle_share_problem(parameters):
+    problem_type = parameters.get("problem_type")
+    if problem_type:
+        return text_response(
+            f"I hear you… it sounds like {problem_type} has been tough for you. "
+            "Would you like me to ask a few short questions (PHQ-9 or GAD-7) "
+            "that professionals often use to check mood and stress?"
+        )
+    return text_response(
+        "Thanks for sharing. Would you like me to ask you a short screening questionnaire "
+        "that helps many people understand how they’re feeling?"
+    )
+
+def handle_offer_screening():
+    return text_response(
+        "I can ask a few short questions used by professionals. "
+        "It takes about 2–3 minutes. Is it okay if I ask them?"
+    )
+
+# -----------------------
+# PHQ-9 Example (Q1 → Q9)
+# -----------------------
+def handle_phq9(parameters):
+    # Collect all answers
+    score = 0
+    for i in range(1, 10):  # phq9_q1 ... phq9_q9
+        ans = parameters.get(f"phq9_q{i}")
+        if ans is not None:
+            try:
+                score += int(ans)
+            except ValueError:
+                pass
+
+    # Interpret score safely
+    if score <= 4:
+        feedback = "Your responses suggest minimal symptoms. Self-care and healthy routines can help."
+    elif score <= 9:
+        feedback = "Your responses suggest mild symptoms. Talking to a counselor could be useful."
+    elif score <= 14:
+        feedback = "Your responses suggest moderate symptoms. Seeking help from a mental health professional is recommended."
+    elif score <= 19:
+        feedback = "Your responses suggest moderately severe symptoms. Please consider professional support soon."
+    else:
+        feedback = (
+            "Your responses suggest severe symptoms. "
+            f"If you are in crisis, please call Tele-MANAS helpline at {TELE_MANAS_HELPLINE} "
+            "or your local emergency number immediately."
+        )
+
+    return text_response(
+        f"Thanks for completing the questionnaire. Your total PHQ-9 score is {score}. {feedback}"
+    )
+
+# -----------------------
+# Crisis Handling
+# -----------------------
+def handle_crisis():
+    return text_response(
+        f"I’m really concerned about your safety. If you are in immediate danger, "
+        f"please call the Tele-MANAS helpline at {TELE_MANAS_HELPLINE} or your local emergency number. "
+        "Would you like me to also connect you with a counselor?"
+    )
+
+# -----------------------
+# Counselor Booking
+# -----------------------
+def handle_booking(parameters):
+    date = parameters.get("booking_date")
+    time = parameters.get("booking_time")
+    method = parameters.get("contact_method")
+
+    if date and time and method:
+        return text_response(
+            f"Your counselling session is booked for {date} at {time}. "
+            f"You will be contacted via {method}. You are taking a strong step towards healing."
+        )
+    else:
+        return text_response("Could you share the date, time, and whether you prefer call, chat, or video?")
+
+# -----------------------
+# Fallback (SAFE version)
+# -----------------------
+def handle_fallback():
+    return text_response(
+        f"I’m here to listen. You can start a questionnaire by saying 'Do the screening'. "
+        f"If you ever feel unsafe or in crisis, please call the Tele-MANAS helpline at {TELE_MANAS_HELPLINE} "
+        "or your local emergency number."
+    )
+
+# -----------------------
+# Webhook route
+# -----------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    body = request.get_json(force=True)
-    query_result = body.get("queryResult", {})
-    intent_name = query_result.get("intent", {}).get("displayName", "")
-    print("Incoming intent:", intent_name)
+    req = request.get_json(force=True)
+    intent = req.get("queryResult", {}).get("intent", {}).get("displayName")
+    parameters = req.get("queryResult", {}).get("parameters", {})
 
-    # Crisis handling
-    if intent_name.lower().startswith("crisis") or "suicid" in intent_name.lower():
-        text = (f"I’m really concerned about your safety. If you are in immediate danger, "
-                f"please call the Tele-MANAS helpline ({TELE_MANAS_HELPLINE}) or your local emergency number. "
-                f"Would you like me to connect you to a counselor?")
-        output_contexts = [{
-            "name": f"{query_result['outputContexts'][0]['name'].split('/contexts/')[0]}/contexts/escalation_flag"
-            if query_result.get("outputContexts") else "escalation_flag",
-            "lifespanCount": 5,
-            "parameters": {"escalation_required": True, "reason": "suicidal_ideation"}
-        }]
-        return jsonify(text_response(text, output_contexts))
+    if intent == "Default Welcome Intent":
+        return jsonify(handle_welcome())
+    elif intent == "Thanks":
+        return jsonify(handle_thanks())
+    elif intent == "Goodbye":
+        return jsonify(handle_goodbye())
+    elif intent == "Share_Problem":
+        return jsonify(handle_share_problem(parameters))
+    elif intent == "Offer_Screening":
+        return jsonify(handle_offer_screening())
+    elif intent == "PHQ-9":
+        return jsonify(handle_phq9(parameters))
+    elif intent == "Crisis_Suicidal":
+        return jsonify(handle_crisis())
+    elif intent == "Counsellor_Booking_Request":
+        return jsonify(handle_booking(parameters))
+    else:
+        return jsonify(handle_fallback())
 
-    # PHQ-9 completion
-    if "phq9" in intent_name.lower():
-        answers = extract_numeric_answers(query_result, "phq9", 9)
-        if not answers:
-            return jsonify(text_response("I didn’t get all the PHQ-9 answers. Please answer each question with 0–3."))
-
-        total, severity, suicidal = score_phq9(answers)
-
-        if suicidal or total >= 20:
-            text = (f"Your PHQ-9 score is {total} ({severity}). Because of high distress or self-harm thoughts, "
-                    f"I recommend immediate support. Would you like me to connect you to the Tele-MANAS helpline "
-                    f"({TELE_MANAS_HELPLINE}) or a counselor?")
-            ctxs = [{
-                "name": f"{query_result['outputContexts'][0]['name'].split('/contexts/')[0]}/contexts/phq9_result"
-                if query_result.get("outputContexts") else "phq9_result",
-                "lifespanCount": 10,
-                "parameters": {"phq9_score": total, "phq9_severity": severity, "suicidalItem": suicidal}
-            }, {
-                "name": f"{query_result['outputContexts'][0]['name'].split('/contexts/')[0]}/contexts/escalation_flag"
-                if query_result.get("outputContexts") else "escalation_flag",
-                "lifespanCount": 5,
-                "parameters": {"escalation_required": True, "reason": "phq9_severe_or_suicidal"}
-            }]
-            return jsonify(text_response(text, ctxs))
-
-        # Non-critical response
-        if total <= 4:
-            suggestion = "Minimal symptoms. Self-care may help (sleep, exercise, social support)."
-        elif total <= 9:
-            suggestion = "Mild symptoms. Consider self-help strategies and monitor your mood."
-        elif total <= 14:
-            suggestion = "Moderate symptoms. Talking to a counselor could help."
-        else:
-            suggestion = "Moderately severe symptoms. Professional support is strongly recommended."
-
-        text = f"Your PHQ-9 score is {total} ({severity}). {suggestion}"
-        ctxs = [{
-            "name": f"{query_result['outputContexts'][0]['name'].split('/contexts/')[0]}/contexts/phq9_result"
-            if query_result.get("outputContexts") else "phq9_result",
-            "lifespanCount": 10,
-            "parameters": {"phq9_score": total, "phq9_severity": severity}
-        }]
-        return jsonify(text_response(text, ctxs))
-
-    # GAD-7 completion
-    if "gad7" in intent_name.lower():
-        answers = extract_numeric_answers(query_result, "gad7", 7)
-        if not answers:
-            return jsonify(text_response("I didn’t get all the GAD-7 answers. Please answer each question with 0–3."))
-        total, severity = score_gad7(answers)
-        advice = "Talking to a counselor may help." if total >= 10 else "You may try some self-care strategies."
-        text = f"Your GAD-7 score is {total} ({severity}). {advice}"
-        ctxs = [{
-            "name": f"{query_result['outputContexts'][0]['name'].split('/contexts/')[0]}/contexts/gad7_result"
-            if query_result.get("outputContexts") else "gad7_result",
-            "lifespanCount": 10,
-            "parameters": {"gad7_score": total, "gad7_severity": severity}
-        }]
-        return jsonify(text_response(text, ctxs))
-
-    # Booking intent
-    if "booking" in intent_name.lower():
-        params = query_result.get("parameters", {})
-        date = params.get("booking_date")
-        time = params.get("booking_time")
-        method = params.get("contact_method")
-
-        if not (date and time and method):
-            return jsonify(text_response("To book, I need a date, time, and contact method. Can you provide those?"))
-
-        # Here you can call an external booking API if available
-        text = f"Your counselling session is booked for {date} at {time}. You will be contacted via {method}."
-        ctxs = [{
-            "name": f"{query_result['outputContexts'][0]['name'].split('/contexts/')[0]}/contexts/booking_confirmed"
-            if query_result.get("outputContexts") else "booking_confirmed",
-            "lifespanCount": 5,
-            "parameters": {"booking_date": date, "booking_time": time, "contact_method": method}
-        }]
-        return jsonify(text_response(text, ctxs))
-
-    # Default fallback
-    # Default fallback (safe version)
-fallback = ("I’m here to listen. You can take a questionnaire (PHQ-9 or GAD-7) "
-            "by saying 'Do the screening'. If you’re feeling unsafe or in crisis, "
-            f"please call the Tele-MANAS helpline at {TELE_MANAS_HELPLINE} or your local emergency number.")
-return jsonify(text_response(fallback))
-
-
+# -----------------------
+# Run locally
+# -----------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(debug=True, port=5000)
+
 
 
