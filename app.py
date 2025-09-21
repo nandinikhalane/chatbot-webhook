@@ -1,154 +1,182 @@
+import json
+import os
 from flask import Flask, request, jsonify
+from google.cloud import dialogflow_v2 as dialogflow
+from google.cloud import language_v1
 
+# Initialize Flask app
 app = Flask(__name__)
 
-# Crisis helpline constant
-TELE_MANAS_HELPLINE = "14416"
+# Set up Google Cloud client for sentiment analysis
+sentiment_client = language_v1.LanguageServiceClient()
 
-# -----------------------
-# Utility: build response
-# -----------------------
-def text_response(text):
-    return {
-        "fulfillmentMessages": [
-            {"text": {"text": [text]}}
-        ]
-    }
+# Initialize PHQ-9 and GAD-7 questions and their corresponding entities
+PHQ9_QUESTIONS = [
+    "Q1: Over the last 2 weeks, how often have you had little interest or pleasure in doing things?",
+    "Q2: Over the last 2 weeks, how often have you felt down, depressed, or hopeless?",
+    "Q3: Over the last 2 weeks, how often have you had trouble falling or staying asleep, or sleeping too much?",
+    "Q4: Over the last 2 weeks, how often have you felt tired or had little energy?",
+    "Q5: Over the last 2 weeks, how often have you had poor appetite or overeating?",
+    "Q6: Over the last 2 weeks, how often have you felt bad about yourself — or that you are a failure or have let yourself or your family down?",
+    "Q7: Over the last 2 weeks, how often have you had trouble concentrating on things, such as reading or watching television?",
+    "Q8: Over the last 2 weeks, how often have you been moving or speaking so slowly that others could notice? Or the opposite — being so fidgety or restless that you have been moving around more than usual?",
+    "Q9: Over the last 2 weeks, how often have you had thoughts that you would be better off dead or of hurting yourself in some way?"
+]
 
-# -----------------------
-# Intent Handlers
-# -----------------------
-def handle_welcome():
-    return text_response("Hi! I’m glad you reached out. How are you feeling today?")
+GAD7_QUESTIONS = [
+    "Q1: Over the last 2 weeks, how often have you felt nervous, anxious, or on edge?",
+    "Q2: Over the last 2 weeks, how often have you not been able to stop or control worrying?",
+    "Q3: Over the last 2 weeks, how often have you been worrying too much about different things?",
+    "Q4: Over the last 2 weeks, how often have you had trouble relaxing?",
+    "Q5: Over the last 2 weeks, how often have you been so restless that it is hard to sit still?",
+    "Q6: Over the last 2 weeks, how often have you been easily annoyed or irritable?",
+    "Q7: Over the last 2 weeks, how often have you felt afraid as if something awful might happen?"
+]
 
-def handle_thanks():
-    return text_response("You’re welcome! I’m here whenever you want to talk.")
+# Scoring thresholds
+PHQ9_THRESHOLDS = {
+    'mild': 5,
+    'moderate': 10,
+    'severe': 20
+}
 
-def handle_goodbye():
-    return text_response("Take care! Reach out anytime. You are not alone.")
+GAD7_THRESHOLDS = {
+    'mild': 5,
+    'moderate': 10,
+    'severe': 15
+}
 
-def handle_share_problem(parameters):
-    problem_type = parameters.get("problem_type")
-    if problem_type:
-        return text_response(
-            f"I hear you… it sounds like {problem_type} has been tough for you. "
-            "Would you like me to ask a few short questions (PHQ-9 or GAD-7) "
-            "that professionals often use to check mood and stress?"
-        )
-    return text_response(
-        "Thanks for sharing. Would you like me to ask you a short screening questionnaire "
-        "that helps many people understand how they’re feeling?"
-    )
+def analyze_sentiment(text):
+    """Detects sentiment in the provided text."""
+    document = language_v1.Document(content=text, type_=language_v1.Document.Type.PLAIN_TEXT)
+    sentiment = sentiment_client.analyze_sentiment(request={'document': document}).document_sentiment
+    return sentiment.score, sentiment.magnitude
 
-def handle_offer_screening():
-    return text_response(
-        "I can ask a few short questions used by professionals. "
-        "It takes about 2–3 minutes. Is it okay if I ask them?"
-    )
+def get_context_parameter(context_list, context_name, param_name):
+    """
+    Extracts a parameter value from a specific context in the webhook request.
+    """
+    for context in context_list:
+        if context.get('name').endswith(f'/contexts/{context_name}'):
+            return context.get('parameters', {}).get(param_name)
+    return None
 
-# -----------------------
-# PHQ-9 Example (Q1 → Q9)
-# -----------------------
-def handle_phq9(parameters):
-    # Collect all answers
-    score = 0
-    for i in range(1, 10):  # phq9_q1 ... phq9_q9
-        ans = parameters.get(f"phq9_q{i}")
-        if ans is not None:
-            try:
-                score += int(ans)
-            except ValueError:
-                pass
-
-    # Interpret score safely
-    if score <= 4:
-        feedback = "Your responses suggest minimal symptoms. Self-care and healthy routines can help."
-    elif score <= 9:
-        feedback = "Your responses suggest mild symptoms. Talking to a counselor could be useful."
-    elif score <= 14:
-        feedback = "Your responses suggest moderate symptoms. Seeking help from a mental health professional is recommended."
-    elif score <= 19:
-        feedback = "Your responses suggest moderately severe symptoms. Please consider professional support soon."
-    else:
-        feedback = (
-            "Your responses suggest severe symptoms. "
-            f"If you are in crisis, please call Tele-MANAS helpline at {TELE_MANAS_HELPLINE} "
-            "or your local emergency number immediately."
-        )
-
-    return text_response(
-        f"Thanks for completing the questionnaire. Your total PHQ-9 score is {score}. {feedback}"
-    )
-
-# -----------------------
-# Crisis Handling
-# -----------------------
-def handle_crisis():
-    return text_response(
-        f"I’m really concerned about your safety. If you are in immediate danger, "
-        f"please call the Tele-MANAS helpline at {TELE_MANAS_HELPLINE} or your local emergency number. "
-        "Would you like me to also connect you with a counselor?"
-    )
-
-# -----------------------
-# Counselor Booking
-# -----------------------
-def handle_booking(parameters):
-    date = parameters.get("booking_date")
-    time = parameters.get("booking_time")
-    method = parameters.get("contact_method")
-
-    if date and time and method:
-        return text_response(
-            f"Your counselling session is booked for {date} at {time}. "
-            f"You will be contacted via {method}. You are taking a strong step towards healing."
-        )
-    else:
-        return text_response("Could you share the date, time, and whether you prefer call, chat, or video?")
-
-# -----------------------
-# Fallback (SAFE version)
-# -----------------------
-def handle_fallback():
-    return text_response(
-        f"I’m here to listen. You can start a questionnaire by saying 'Do the screening'. "
-        f"If you ever feel unsafe or in crisis, please call the Tele-MANAS helpline at {TELE_MANAS_HELPLINE} "
-        "or your local emergency number."
-    )
-
-# -----------------------
-# Webhook route
-# -----------------------
-@app.route("/webhook", methods=["POST"])
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    req = request.get_json(force=True)
-    intent = req.get("queryResult", {}).get("intent", {}).get("displayName")
-    parameters = req.get("queryResult", {}).get("parameters", {})
+    """DialogFlow webhook handler."""
+    req = request.get_json(silent=True, force=True)
+    intent_name = req['queryResult']['intent']['displayName']
+    
+    # 🚨 Safety Layer: Check sentiment for every message
+    user_text = req['queryResult']['queryText']
+    sentiment_score, _ = analyze_sentiment(user_text)
 
-    if intent == "Default Welcome Intent":
-        return jsonify(handle_welcome())
-    elif intent == "Thanks":
-        return jsonify(handle_thanks())
-    elif intent == "Goodbye":
-        return jsonify(handle_goodbye())
-    elif intent == "Share_Problem":
-        return jsonify(handle_share_problem(parameters))
-    elif intent == "Offer_Screening":
-        return jsonify(handle_offer_screening())
-    elif intent == "PHQ-9":
-        return jsonify(handle_phq9(parameters))
-    elif intent == "Crisis_Suicidal":
-        return jsonify(handle_crisis())
-    elif intent == "Counsellor_Booking_Request":
-        return jsonify(handle_booking(parameters))
-    else:
-        return jsonify(handle_fallback())
+    # Immediate crisis detection
+    if sentiment_score <= -0.8 or intent_name == 'Crisis_Suicidal':
+        return handle_crisis_escalation(req)
 
-# -----------------------
-# Run locally
-# -----------------------
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    if intent_name == 'PHQ9_q9':
+        return handle_phq9_completion(req)
+    
+    # Check for GAD-7 completion
+    elif intent_name == 'GAD7_q7':
+        return handle_gad7_completion(req)
+
+    elif intent_name == 'Counsellor_Booking_Request':
+        return handle_counsellor_booking(req)
+
+    # Handle all other intents without webhook logic by default
+    return jsonify({
+        'fulfillmentText': req['queryResult']['fulfillmentText']
+    })
+
+def handle_phq9_completion(req):
+    """
+    Calculates the PHQ-9 score and provides a response based on severity.
+    """
+    phq9_score = 0
+    # Retrieve score parameters from the 'in_phq9' context
+    contexts = req.get('queryResult', {}).get('outputContexts', [])
+    for i in range(1, 10):
+        try:
+            param_name = f'phq9_q{i}.original'
+            score_str = get_context_parameter(contexts, 'in_phq9', param_name)
+            if score_str is not None:
+                phq9_score += int(score_str)
+        except (ValueError, TypeError):
+            continue
+
+    response_text = "Thanks for completing the questions. Based on your answers, "
+    
+    if phq9_score < PHQ9_THRESHOLDS['mild']:
+        response_text += "your score suggests a minimal level of depression. Focusing on self-care and staying connected with friends can be helpful."
+    elif phq9_score < PHQ9_THRESHOLDS['moderate']:
+        response_text += "your score suggests mild to moderate depression. Talking to a professional counselor could be a great next step. Would you like to book a session?"
+    else: # Severe
+        response_text += "your score suggests a severe level of depression. It's really important to get help right away. Talking to a professional could make a huge difference. Would you like me to connect you to the Tele-MANAS helpline?"
+
+    return jsonify({
+        'fulfillmentText': response_text
+    })
+
+def handle_gad7_completion(req):
+    """
+    Calculates the GAD-7 score and provides a response based on severity.
+    """
+    # This logic would be similar to the PHQ-9 handler, using GAD7_THRESHOLDS.
+    # We would need to retrieve parameters from an 'in_gad7' context.
+    # For brevity, this is left as a placeholder, as the provided flow focuses on PHQ-9.
+    return jsonify({
+        'fulfillmentText': "Thanks for completing the GAD-7 questions. I'll analyze your answers and suggest next steps."
+    })
+
+def handle_crisis_escalation(req):
+    """
+    Provides an immediate and direct crisis response.
+    """
+    # This intent is a red flag. Give direct, actionable advice.
+    crisis_response = "I'm really concerned about your safety. If you are in immediate danger, please call the Tele-MANAS helpline at 14416. We can talk more, but your safety is the most important thing right now. Would you like to connect to a helpline or a counselor?"
+    
+    # The webhook can also trigger an email or SMS alert to a human team
+    # log_crisis_alert(req['session'], req['queryResult']['queryText'])
+    
+    return jsonify({
+        'fulfillmentText': crisis_response
+    })
+
+def handle_counsellor_booking(req):
+    """
+    Confirms the booking with the user and could be extended to
+    connect to an external calendar API.
+    """
+    parameters = req['queryResult']['parameters']
+    date = parameters.get('booking_date')
+    time = parameters.get('booking_time')
+    method = parameters.get('contact_method')
+
+    if not all([date, time, method]):
+        # This part is handled by DialogFlow's slot-filling.
+        # This webhook function will only be called after all slots are filled.
+        return jsonify({
+            'fulfillmentText': "I need a few more details to book your session."
+        })
+
+    confirmation_text = f"Your counselling session is booked for {date} at {time}. You will be contacted via {method}."
+    
+    # Here you would integrate with a booking API (e.g., Google Calendar, a custom backend)
+    # try:
+    #   book_session_in_backend(date, time, method)
+    #   confirmation_text = "Your session is confirmed!"
+    # except Exception as e:
+    #   confirmation_text = "I'm sorry, I couldn't book your session right now. Please try again later."
+    
+    return jsonify({
+        'fulfillmentText': confirmation_text
+    })
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
 
 
 
