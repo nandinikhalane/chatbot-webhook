@@ -213,9 +213,11 @@ def webhook():
         return jsonify(text_response(text, ctxs))
 
     # Default fallback
-    fallback = ("Thanks — I got your message. If you want to take a short questionnaire (PHQ-9 or GAD-7), "
-                "say 'Do the screening'. If you're in crisis, type 'I want to die'.")
-    return jsonify(text_response(fallback))
+    # Default fallback (safe version)
+fallback = ("I’m here to listen. You can take a questionnaire (PHQ-9 or GAD-7) "
+            "by saying 'Do the screening'. If you’re feeling unsafe or in crisis, "
+            f"please call the Tele-MANAS helpline at {TELE_MANAS_HELPLINE} or your local emergency number.")
+return jsonify(text_response(fallback))
 
 
 if __name__ == "__main__":
